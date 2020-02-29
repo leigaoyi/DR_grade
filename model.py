@@ -307,8 +307,26 @@ class ResNeXt(nn.Module):
         self.layer2 = self._make_layer(block, 128, layers[1], 2)
         self.layer3 = self._make_layer(block, 256, layers[2], 2)
         self.layer4 = self._make_layer(block, 512, layers[3], 2)
+        
+        self.g_conv1 = nn.Conv2d(2048, 256, kernel_size=3, stride=1, padding=0, bias=False)
+        self.g_conv2 = nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=0, bias=False)
+        
+        self.e_conv1 = nn.Conv2d(2048, 256, kernel_size=3, stride=1, padding=0, bias=False)
+        self.e_conv2 = nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=0, bias=False)
+        
+        self.g_bn = nn.BatchNorm2d(512)
+        self.e_bn = nn.BatchNorm2d(512)
+        
+        self.g_se = SqueezeExcitation(256, 256//4)
+        self.e_se = SqueezeExcitation(256, 256//4)
+    
+        
         self.avgpool = nn.AvgPool2d(7)      
-        self.fc = nn.Linear(512 * block.expansion, num_classes)
+        
+        #512 * block.expansion original
+        
+        self.g_fc = nn.Linear(4608, num_classes)
+        self.e_fc = nn.Linear(4608, 3)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -352,9 +370,131 @@ class ResNeXt(nn.Module):
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
-        x = self.avgpool(x)
+#        x = self.avgpool(x)        
+#        x = x.view(x.size(0), -1)
+#        x = self.fc(x)
+        
+        g_x = self.g_conv1(x)
+        e_x = self.e_conv1(x)
+        
+        g_se = self.g_se(g_x)
+        e_se = self.e_se(e_x)
+        
+        g_x = self.g_conv2(torch.cat((g_x, e_se), 1))
+        e_x = self.e_conv2(torch.cat((e_x, g_se), 1))
+        
+        g_x = self.g_bn(g_x)
+        e_x = self.e_bn(e_x)
+        
+        g_x = g_x.view(g_x.size(0), -1)
+        e_x = e_x.view(e_x.size(0), -1)
+        
+        g_x = self.g_fc(g_x)
+        e_x = self.e_fc(e_x)
+
+        return g_x, e_x
+    
+class ResNeXt_2(nn.Module):
+    """
+    ResNext optimized for the ImageNet dataset, as specified in
+    https://arxiv.org/pdf/1611.05431.pdf
+    """
+    def __init__(self, baseWidth, cardinality, layers, num_classes):
+        """ Constructor
+        Args:
+            baseWidth: baseWidth for ResNeXt.
+            cardinality: number of convolution groups.
+            layers: config of layers, e.g., [3, 4, 6, 3]
+            num_classes: number of classes
+        """
+        super(ResNeXt_2, self).__init__()
+        block = Bottleneck
+
+        self.cardinality = cardinality
+        self.baseWidth = baseWidth
+        self.num_classes = num_classes
+        self.inplanes = 64
+        self.output_size = 64
+
+        self.conv1 = nn.Conv2d(3, 64, 7, 2, 3, bias=False)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpool1 = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        self.layer1 = self._make_layer(block, 64, layers[0])
+        self.layer2 = self._make_layer(block, 128, layers[1], 2)
+        self.layer3 = self._make_layer(block, 256, layers[2], 2)
+        self.layer4 = self._make_layer(block, 512, layers[3], 2)
+    
+        
+        self.avgpool = nn.AvgPool2d(7)      
+        
+        #512 * block.expansion original
+        self.fc = nn.Linear(512 * block.expansion, num_classes)
+
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2. / n))
+            elif isinstance(m, nn.BatchNorm2d):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
+
+    def _make_layer(self, block, planes, blocks, stride=1):
+        """ Stack n bottleneck modules where n is inferred from the depth of the network.
+        Args:
+            block: block type used to construct ResNext
+            planes: number of output channels (need to multiply by block.expansion)
+            blocks: number of blocks to be built
+            stride: factor to reduce the spatial dimensionality in the first bottleneck of the block.
+        Returns: a Module consisting of n sequential bottlenecks.
+        """
+        downsample = None
+        if stride != 1 or self.inplanes != planes * block.expansion:
+            downsample = nn.Sequential(
+                nn.Conv2d(self.inplanes, planes * block.expansion,
+                          kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(planes * block.expansion),
+            )
+
+        layers = []
+        layers.append(block(self.inplanes, planes, self.baseWidth, self.cardinality, stride, downsample))
+        self.inplanes = planes * block.expansion
+        for i in range(1, blocks):
+            layers.append(block(self.inplanes, planes, self.baseWidth, self.cardinality))
+
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool1(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.avgpool(x)        
         x = x.view(x.size(0), -1)
         x = self.fc(x)
+        
+#        g_x = self.g_conv1(x)
+#        e_x = self.e_conv1(x)
+#        
+#        g_se = self.g_se(g_x)
+#        e_se = self.e_se(e_x)
+#        
+#        g_x = self.g_conv2(torch.cat((g_x, e_se), 1))
+#        e_x = self.e_conv2(torch.cat((e_x, g_se), 1))
+#        
+#        g_x = self.g_bn(g_x)
+#        e_x = self.e_bn(e_x)
+#        
+#        g_x = g_x.view(g_x.size(0), -1)
+#        e_x = e_x.view(e_x.size(0), -1)
+#        
+#        g_x = self.g_fc(g_x)
+#        e_x = self.e_fc(e_x)
 
         return x
 
@@ -367,11 +507,11 @@ def resnext50(baseWidth=4, cardinality=32):
     return model
 
 
-def resnext101(baseWidth, cardinality):
+def resnext101(baseWidth=4, cardinality=32):
     """
     Construct ResNeXt-101.
     """
-    model = ResNeXt(baseWidth, cardinality, [3, 4, 23, 3], 1000)
+    model = ResNeXt_2(baseWidth, cardinality, [3, 4, 23, 3], 6)
     return model
 
 

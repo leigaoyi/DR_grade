@@ -7,18 +7,33 @@ Created on Fri Feb 28 07:58:28 2020
 
 from model import EfficientNet
 
-from data import train_loader, test_loader, eval_train_loader
+from data import train_loader
 from loss import MultiTaskLoss
+import numpy as np
+
+import os
+import time
+
+from tqdm import tqdm
 
 import torch
-#from apex import amp
+
 import torch.nn as nn
 
 from model import resnext50
 
 from eval import cl_accuracy
+from loss import FocalLoss
 
 use_amp = False
+
+if use_amp:
+    from apex import amp
+
+
+ckpt_dir = './checkpoints/'
+if not os.path.exists(ckpt_dir):
+    os.makedirs(ckpt_dir)
 
 model = resnext50()
 
@@ -60,9 +75,12 @@ import torch.optim as optim
 import torch.nn.functional as F
 from data import class_weights
 from loss import kappa_loss
+from data import e_class_w
 
-criterion = MultiTaskLoss(gamma=2., alpha=class_weights, second_loss=kappa_loss, second_mult=0.5)
-lr = 1e-3  # placeholder only! check the LR schedulers below
+criterion_g = MultiTaskLoss(gamma=2., alpha=class_weights, second_loss=kappa_loss, second_mult=0.5)
+criterion_e = FocalLoss(alpha=e_class_w)
+
+lr = 1e-2  # placeholder only! check the LR schedulers below
 
 #optimizer = optim.SGD([
 #    {
@@ -89,8 +107,8 @@ if use_amp:
     # Initialize Amp
     model, optimizer = amp.initialize(model, optimizer, opt_level="O2", num_losses=1)
     
-
-for epoch in range(200):
+epoch_num = 1000
+for epoch in range(epoch_num):
     model.train()
     
 #    if epoch == 0:
@@ -108,19 +126,27 @@ for epoch in range(200):
 #        for name, child in model.named_children():
 #            for param in child.parameters():
 #                param.requires_grad = True
+    acc_list = []
+    loss_list = []
     
-    for x, y in train_loader:
+    start_t = time.time()
+    for x, y, z in train_loader:
         #print(y)
         
         x = x.to(device)
         y = y.to(device)
+        z = z.to(device)
         
-        y_pred = model(x)
+        y_pred, z_pred = model(x)
     
         # Compute loss 
-        loss = criterion(y_pred, y)
+        loss_g = criterion_g(y_pred, y)
+        loss_e = criterion_e(z_pred, z)
+        loss = loss_g + loss_e
         
         acc = cl_accuracy(y_pred, y)
+        acc_list.append(acc)
+        loss_list.append(loss.item())
     
         optimizer.zero_grad()
         if use_amp:
@@ -130,7 +156,17 @@ for epoch in range(200):
             loss.backward()
         optimizer.step()
         #print('Output ', y_pred.max().item())
-        print('Loss {0:.4f}, acc {1:.4f}'.format(loss.item(), acc))
-        
+    end_t = time.time()
+    cost_t = -(start_t - end_t)/60
+    mean_acc = np.mean(acc_list)
+    print('Epoch {2} Loss {0:.4f}, acc {1:.4f}, time {3:.4f} min'.format(np.mean(loss_list), mean_acc,\
+          epoch, cost_t))
     
+    with open('Accuracy.txt', 'a+') as f:
+        f.write('Epoch {0} Acc {1:.4f} \n'.format(epoch+1, mean_acc))
+               
+    if (epoch+1)%50 == 0:
+        path = os.path.join(ckpt_dir, str(epoch+1)+'_{:.4f}.pt'.format(mean_acc))
+        torch.save(model.state_dict(), path)
+        
     

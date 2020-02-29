@@ -58,4 +58,3 @@ class MultiTaskLoss(FocalLoss):
         loss += self.second_mult * self.second_loss(inputs[...,-1], targets.float())
         return loss
     
-    

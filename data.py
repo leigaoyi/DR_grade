@@ -15,6 +15,10 @@ import torch
 import pandas as pd
 from sklearn.utils import shuffle
 
+import numpy as np
+
+debug = False
+
 resolution = 224
 img_stats  = [[0.485, 0.456, 0.406], [0.229, 0.224, 0.225]]
 
@@ -25,9 +29,12 @@ df_test = pd.read_csv('./data/Test_label.csv')
 
 x = df_train['id_code']
 y = df_train['diagnosis']
+z = df_train['edema']
 
-x, y = shuffle(x, y)
-_ = y.hist()
+
+x, y, z = shuffle(x, y, z)
+#x, y, z = x.values, y.values, z.values
+#_ = y.hist()
 
 # get class stats
 n_classes = int(y.max()+1)
@@ -35,10 +42,19 @@ class_weights = len(y) / df_train.groupby('diagnosis').size().values.ravel()  # 
 class_weights *= n_classes / class_weights.sum()
 print('class_weights:', class_weights.tolist())
 
+e_classes = 3
+e_class_w = len(z)/df_train.groupby('edema').size().values.ravel()
+e_class_w *= e_classes/e_class_w.sum()
+
 from sklearn.model_selection import train_test_split
 
-train_x, valid_x, train_y, valid_y = train_test_split(x.values, y.values, test_size=0.10, stratify=y, random_state=42)
+train_x, valid_x, train_y, valid_y = train_test_split(x.values, y.values, test_size=0.20, stratify=y, random_state=42)
 test_x = df_test.id_code.values
+
+
+if debug:
+    train_x, train_y = train_x[:128], train_y[:128]
+    valid_x, valid_y = valid_x[:64], valid_y[:64]
 
 print(train_x.shape)
 print(train_y.shape)
@@ -59,6 +75,8 @@ class ImageDataset(torch.utils.data.Dataset):
         self.extension = extension
         if targets is not None:
             assert len(self.path_list) == len(self.targets)
+#            self.g_targets = torch.LongTensor(targets[0])
+#            self.e_targets = torch.LongTensor(targets[1])
             self.targets = torch.LongTensor(targets)
 
     def __getitem__(self, index):
@@ -73,9 +91,13 @@ class ImageDataset(torch.utils.data.Dataset):
         if self.transform is not None:
             sample = self.transform(sample)
 
+        #self.ones = np.zeros
+
         if self.targets is not None:
+            #return sample, self.g_targets[index], self.e_targets[index]
             return sample, self.targets[index]
         else:
+            #return sample, torch.LongTensor([]), torch.LongTensor([])
             return sample, torch.LongTensor([])
 
     def __len__(self):
